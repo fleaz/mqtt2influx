@@ -1,37 +1,38 @@
 package main
 
 import (
-	"github.com/eclipse/paho.mqtt.golang"
-	"github.com/influxdata/influxdb/client/v2"
+	"fmt"
 	"log"
+	"strconv"
+	"strings"
 	"sync"
 	"time"
-	"strings"
+
+	"github.com/eclipse/paho.mqtt.golang"
+	"github.com/influxdata/influxdb/client/v2"
+	"github.com/spf13/viper"
 )
 
-const (
-	influx_host = "http://localhost:8086"
-	influx_db   = "mqtt"
-	influx_user = "influxuser"
-	influx_pass = "supersecret"
-	mqtt_broker = "tcp://mqttbroker:1883"
-	mqtt_user   = "mqttuser"
-	mqtt_pass   = "mqttpass"
-	mqtt_topic  = "ibg10/esper/#"
-)
-
-func MQTTMessageHandler(mqtt_client mqtt.Client, msg mqtt.Message, c client.Client) {
+func MQTTMessageHandler(mqtt_client mqtt.Client, msg mqtt.Message, c client.Client, db string) {
 	t := msg.Topic()
 	p := string(msg.Payload())
-
-	if strings.Contains(t, "bme"){
-
-		topicParts := strings.Split(t, "/")
-		id, sensor := topicParts[2], topicParts[4]
-		log.Printf("Got %s for sensor %s on BME %s", p, sensor, id)
+	_, err := strconv.ParseFloat(p, 64)
+	if err != nil {
+		log.Printf("the payload on %s was not a float number", t)
+		return
 	}
+
+	if !strings.Contains(t, "bme") {
+		// TODO: Maybe use a regexp from the config file to
+		// differentiate between good and bad topics
+		return
+	}
+
+	topicParts := strings.Split(t, "/")
+	id, sensor := topicParts[2], topicParts[4]
+
 	bp, err := client.NewBatchPoints(client.BatchPointsConfig{
-		Database:  influx_db,
+		Database:  db,
 		Precision: "s",
 	})
 	if err != nil {
@@ -39,10 +40,13 @@ func MQTTMessageHandler(mqtt_client mqtt.Client, msg mqtt.Message, c client.Clie
 	}
 
 	fields := map[string]interface{}{
-		"value": p,
+		"value":  p,
+		"sensor": sensor,
 	}
 
-	pt, err := client.NewPoint(t, nil, fields, time.Now())
+	s := []string{id, sensor}
+	seriesName := strings.Join(s, "-")
+	pt, err := client.NewPoint(seriesName, nil, fields, time.Now())
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -52,13 +56,22 @@ func MQTTMessageHandler(mqtt_client mqtt.Client, msg mqtt.Message, c client.Clie
 	if err := c.Write(bp); err != nil {
 		log.Fatal(err)
 	}
+	log.Printf("Added %6s from the %11s sensor of the BME-%s", p, sensor, id)
 }
 
 func main() {
-	influx_client, err := client.NewHTTPClient(client.HTTPConfig{
-		Addr:     influx_host,
-		Username: influx_user,
-		Password: influx_pass,
+	viper.SetConfigName("config")
+	viper.AddConfigPath(".")
+	err := viper.ReadInConfig()
+	if err != nil {
+		panic(fmt.Errorf("fatal error config file: %s", err))
+	}
+
+	influxConf := viper.Sub("influx")
+	influxClient, err := client.NewHTTPClient(client.HTTPConfig{
+		Addr:     influxConf.GetString("host"),
+		Username: influxConf.GetString("user"),
+		Password: influxConf.GetString("pass"),
 	})
 
 	log.Print("Connected to influxdb")
@@ -66,7 +79,8 @@ func main() {
 		log.Fatal(err)
 	}
 
-	opts := mqtt.NewClientOptions().AddBroker(mqtt_broker).SetUsername(mqtt_user).SetPassword(mqtt_pass)
+	mqttConf := viper.Sub("mqtt")
+	opts := mqtt.NewClientOptions().AddBroker(mqttConf.GetString("broker")).SetUsername(mqttConf.GetString("user")).SetPassword(mqttConf.GetString("pass"))
 	mqttClient := mqtt.NewClient(opts)
 	if token := mqttClient.Connect(); token.Wait() && token.Error() != nil {
 		log.Fatal(token.Error())
@@ -74,8 +88,8 @@ func main() {
 	wg := sync.WaitGroup{}
 	wg.Add(1)
 
-	if token := mqttClient.Subscribe(mqtt_topic, 0, func(mqttClient mqtt.Client, msg mqtt.Message) {
-		MQTTMessageHandler(mqttClient, msg, influx_client)
+	if token := mqttClient.Subscribe(mqttConf.GetString("topic"), 0, func(mqttClient mqtt.Client, msg mqtt.Message) {
+		MQTTMessageHandler(mqttClient, msg, influxClient, influxConf.GetString("db"))
 	}); token.Wait() && token.Error() != nil {
 		log.Fatal(token.Error())
 	}

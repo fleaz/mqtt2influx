@@ -1,0 +1,12 @@
+---
+influx: 
+  host: "http://localhost:8086"
+  db: "mqtt"
+  user: "influxuser"
+  pass: "supersecret"
+
+mqtt:
+  broker: "tcp://mqttbroker:1883"
+  user: "mqttuser"
+  pass: "mqttpass"
+  topic: "internet/of/things/#"
